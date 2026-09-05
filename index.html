@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>V/F変換 DC電圧計</title>
+  <style>
+    body { font-family: sans-serif; background: #121212; color: #fff; text-align: center; padding: 20px; }
+    .card { background: #1e1e1e; padding: 20px; border-radius: 12px; max-width: 400px; margin: 0 auto; }
+    .val { font-size: 3rem; color: #00e676; font-family: monospace; margin: 10px 0; }
+    .sub { font-size: 1rem; color: #aaa; }
+    button { padding: 12px 24px; font-size: 1rem; border: none; border-radius: 6px; background: #29b6f6; cursor: pointer; }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <h2>DC Voltage (V/F)</h2>
+  <div class="val"><span id="vDisplay">0.000</span> V</div>
+  <div class="sub">検出周波数: <span id="fDisplay">0</span> Hz</div>
+  <br>
+  <button id="toggleBtn">測定開始</button>
+</div>
+
+<script>
+  let audioCtx, analyser, stream, animId;
+  let isMeasuring = false;
+
+  const vDisplay = document.getElementById('vDisplay');
+  const fDisplay = document.getElementById('fDisplay');
+  const toggleBtn = document.getElementById('toggleBtn');
+
+  // キャリブレーションパラメータ (回路定数に応じて調整)
+  // f = a * V_in + b のような一次近似、または補間計算を用いる
+  function frequencyToVoltage(freq) {
+    if (freq <= 0) return 0;
+
+    // 例: 実測データから作成した換算式
+    // ※ 実際にはKnownな電圧（0.5V, 1.0V, 1.5V等）を入力した際の周波数を測定して係数を設定します
+    const a = -0.0005; // 電圧が上がると周波数が下がる構成の場合の傾き
+    const b = 2.0;      // 切片
+    
+    let v = a * freq + b;
+    return v < 0 ? 0 : v;
+  }
+
+  async function start() {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    });
+
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 4096; // 周波数分解能を高めるために大きめに設定
+
+    const source = audioCtx.createMediaStreamSource(stream);
+    source.connect(analyser);
+
+    isMeasuring = true;
+    toggleBtn.textContent = '停止';
+    loop();
+  }
+
+  function stop() {
+    isMeasuring = false;
+    cancelAnimationFrame(animId);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (audioCtx) audioCtx.close();
+    toggleBtn.textContent = '測定開始';
+  }
+
+  function loop() {
+    if (!isMeasuring) return;
+
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Float32Array(bufferLength);
+    analyser.getFloatFrequencyData(dataArray); // dB値を取得
+
+    // 最大振幅を持つ周波数インデックス（ピーク）を探索
+    let maxDb = -Infinity;
+    let maxIndex = -1;
+    for (let i = 0; i < bufferLength; i++) {
+      if (dataArray[i] > maxDb) {
+        maxDb = dataArray[i];
+        maxIndex = i;
+      }
+    }
+
+    // 周波数(Hz)の計算: sampleRate / fftSize * index
+    const nyquist = audioCtx.sampleRate / 2;
+    const peakFreq = maxIndex * (nyquist / bufferLength);
+
+    // 一定以上の信号強度がある場合のみ電圧計算を更新
+    if (maxDb > -70) {
+      const voltage = frequencyToVoltage(peakFreq);
+      fDisplay.textContent = Math.round(peakFreq);
+      vDisplay.textContent = voltage.toFixed(3);
+    } else {
+      fDisplay.textContent = '---';
+      vDisplay.textContent = '0.000';
+    }
+
+    animId = requestAnimationFrame(loop);
+  }
+
+  toggleBtn.addEventListener('click', () => {
+    isMeasuring ? stop() : start();
+  });
+</script>
+
+</body>
+</html>
