@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>V/F Signal Debugger</title>
+  <style>
+    body {
+      font-family: monospace;
+      background-color: #0d1117;
+      color: #c9d1d9;
+      padding: 15px;
+      margin: 0;
+      box-sizing: border-box;
+    }
+    .container { max-width: 480px; margin: 0 auto; }
+    .card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+    .metric {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin: 8px 0;
+    }
+    .value { font-size: 1.8rem; font-weight: bold; color: #58a6ff; }
+    .unit { font-size: 1rem; color: #8b949e; margin-left: 4px; }
+    
+    /* 信号強度バー */
+    .meter-bg {
+      background: #21262d;
+      height: 16px;
+      border-radius: 8px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+    .meter-fill {
+      height: 100%;
+      width: 0%;
+      background: #238636;
+      transition: width 0.1s ease;
+    }
+    
+    /* 波形表示用キャンバス */
+    canvas {
+      width: 100%;
+      height: 120px;
+      background: #000;
+      border-radius: 4px;
+      margin-top: 8px;
+      border: 1px solid #30363d;
+    }
+
+    .status {
+      font-weight: bold;
+      padding: 4px 8px;
+      border-radius: 4px;
+      display: inline-block;
+      margin-top: 8px;
+    }
+    .status-ok { background: #238636; color: #fff; }
+    .status-warn { background: #9e6a03; color: #fff; }
+    .status-none { background: #da3633; color: #fff; }
+
+    button {
+      width: 100%;
+      padding: 12px;
+      font-size: 1rem;
+      font-weight: bold;
+      background: #238636;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    button:disabled { background: #30363d; color: #8b949e; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h2>V/F 信号デバッガー</h2>
+  
+  <button id="toggleBtn">マイク入力解析 開始</button>
+
+  <div class="card" style="margin-top: 12px;">
+    <div class="metric">
+      <span>ピーク周波数</span>
+      <div><span id="freqVal" class="value">0</span><span class="unit">Hz</span></div>
+    </div>
+    <div class="metric">
+      <span>信号強度 (Peak)</span>
+      <div><span id="dbVal" class="value">-100</span><span class="unit">dB</span></div>
+    </div>
+    <div class="meter-bg">
+      <div id="dbMeter" class="meter-fill"></div>
+    </div>
+    <div id="signalStatus" class="status status-none">信号なし / 切断</div>
+  </div>
+
+  <div class="card">
+    <span>リアルタイム波形 (時間軸)</span>
+    <canvas id="waveform"></canvas>
+  </div>
+</div>
+
+<script>
+  let audioCtx, analyser, stream, animId;
+  let isRunning = false;
+
+  const toggleBtn = document.getElementById('toggleBtn');
+  const freqVal = document.getElementById('freqVal');
+  const dbVal = document.getElementById('dbVal');
+  const dbMeter = document.getElementById('dbMeter');
+  const signalStatus = document.getElementById('signalStatus');
+  const canvas = document.getElementById('waveform');
+  const canvasCtx = canvas.getContext('2d');
+
+  async function start() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false
+        }
+      });
+
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048; // 分解能と描画速度のバランス
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+
+      isRunning = true;
+      toggleBtn.textContent = '解析 停止';
+      toggleBtn.style.background = '#da3633';
+      loop();
+    } catch (err) {
+      alert('マイクの初期化に失敗しました: ' + err.message);
+    }
+  }
+
+  function stop() {
+    isRunning = false;
+    cancelAnimationFrame(animId);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (audioCtx) audioCtx.close();
+    
+    toggleBtn.textContent = 'マイク入力解析 開始';
+    toggleBtn.style.background = '#238636';
+    signalStatus.className = 'status status-none';
+    signalStatus.textContent = '信号なし / 切断';
+  }
+
+  function loop() {
+    if (!isRunning) return;
+
+    const bufferLength = analyser.frequencyBinCount;
+    
+    // 1. 周波数領域の解析（ピーク検出）
+    const freqData = new Float32Array(bufferLength);
+    analyser.getFloatFrequencyData(freqData);
+
+    let maxDb = -160;
+    let maxIndex = -1;
+    for (let i = 0; i < bufferLength; i++) {
+      if (freqData[i] > maxDb) {
+        maxDb = freqData[i];
+        maxIndex = i;
+      }
+    }
+
+    const nyquist = audioCtx.sampleRate / 2;
+    const peakFreq = maxIndex * (nyquist / bufferLength);
+
+    // 2. 画面数値とメーターの更新
+    freqVal.textContent = Math.round(peakFreq);
+    dbVal.textContent = maxDb.toFixed(1);
+
+    // dB値 (-100dB 〜 0dB) を 0% 〜 100% のゲージに変換
+    const meterPercent = Math.max(0, Math.min(100, (maxDb + 100) * 1.25));
+    dbMeter.style.width = meterPercent + '%';
+
+    // 3. 判定ロジック
+    if (maxDb > -45) {
+      // 十分な強度がある明確な信号
+      signalStatus.className = 'status status-ok';
+      signalStatus.textContent = '有効な信号を受信中';
+      dbMeter.style.background = '#238636';
+    } else if (maxDb > -65) {
+      // 弱めの信号または環境ノイズ
+      signalStatus.className = 'status status-warn';
+      signalStatus.textContent = '信号低下 / ノイズ混入の可能性';
+      dbMeter.style.background = '#9e6a03';
+    } else {
+      // ほぼ無信号（ノイズフロア以下）
+      signalStatus.className = 'status status-none';
+      signalStatus.textContent = '信号なし (入力感度不足)';
+      dbMeter.style.background = '#da3633';
+    }
+
+    // 4. 波形の描画 (時間軸)
+    const timeData = new Uint8Array(analyser.fftSize);
+    analyser.getByteTimeDomainData(timeData);
+
+    canvasCtx.fillStyle = '#000';
+    canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+    canvasCtx.lineWidth = 2;
+    canvasCtx.strokeStyle = '#58a6ff';
+    canvasCtx.beginPath();
+
+    const sliceWidth = canvas.width * 1.0 / analyser.fftSize;
+    let x = 0;
+
+    for (let i = 0; i < analyser.fftSize; i++) {
+      const v = timeData[i] / 128.0;
+      const y = v * canvas.height / 2;
+
+      if (i === 0) {
+        canvasCtx.moveTo(x, y);
+      } else {
+        canvasCtx.lineTo(x, y);
+      }
+      x += sliceWidth;
+    }
+    canvasCtx.stroke();
+
+    animId = requestAnimationFrame(loop);
+  }
+
+  toggleBtn.addEventListener('click', () => {
+    isRunning ? stop() : start();
+  });
+</script>
+
+</body>
+</html>
